@@ -110,7 +110,9 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
     var panel = document.getElementById('camPanel');
     var video = document.getElementById('camVideo');
     var numEl = document.getElementById('camNum');
-    var shotEl = document.getElementById('camShot');   /* ภาพที่หน้าต่างกล้องส่งกลับมา */
+    var shotEl = document.getElementById('camShot');   /* ทางสำรอง: ภาพ JPEG */
+    var cvEl = document.getElementById('camCanvas');   /* ทางหลัก: ภาพดิบที่โอนมาตรง ๆ */
+    var cvCx = null;
     var msgEl = document.getElementById('camMsg');
     var closeBtn = document.getElementById('camClose');
 
@@ -166,6 +168,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
       if (video) { video.srcObject = null; video.style.display = ''; }
       if (shotEl) { shotEl.hidden = true; shotEl.removeAttribute('src'); }
+      if (cvEl) cvEl.hidden = true;
       show(false);
       btn.textContent = 'เปิดกล้อง';
       btn.classList.remove('on');
@@ -191,10 +194,23 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       if (d.kind === 'closed') { stop(); return; }
       if (d.kind === 'ready') { msg('ชูนิ้วหน้ากล้องได้เลย ภาพจะมาโชว์ตรงนี้'); return; }
       /* ภาพมาเป็น data:image/jpeg ที่หน้าต่างกล้องวาดเอง ไม่ได้โหลดจากที่อื่น */
-      if (d.kind === 'frame' && typeof d.img === 'string' && d.img.indexOf('data:image/jpeg') === 0) {
-        lastFrame = Date.now();
-        if (shotEl) { shotEl.src = d.img; shotEl.hidden = false; }
-        if (video) video.style.display = 'none';
+      if (d.kind === 'frame') {
+        /* ภาพดิบที่โอนมา วาดลงแคนวาสได้เลย ไม่ต้องถอดรหัสอะไรอีก เร็วที่สุด */
+        if (d.bmp && cvEl) {
+          lastFrame = Date.now();
+          if (cvEl.width !== d.bmp.width) { cvEl.width = d.bmp.width; cvEl.height = d.bmp.height; }
+          if (!cvCx) cvCx = cvEl.getContext('2d');
+          cvCx.drawImage(d.bmp, 0, 0);
+          try { d.bmp.close(); } catch (e) { }   /* คืนหน่วยความจำทันที ไม่งั้นบวมเร็วมาก */
+          cvEl.hidden = false;
+          if (video) video.style.display = 'none';
+          return;
+        }
+        if (typeof d.img === 'string' && d.img.indexOf('data:image/jpeg') === 0) {
+          lastFrame = Date.now();
+          if (shotEl) { shotEl.src = d.img; shotEl.hidden = false; }
+          if (video) video.style.display = 'none';
+        }
         return;
       }
       if (d.kind === 'count' && typeof d.n === 'number' && d.n >= 0 && d.n <= 5) feed(d.n);
@@ -312,16 +328,14 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
   var stream = null, hands = null, on = false, busy = false, last = null;
 
   /* ส่งภาพกลับไปให้หน้าสอบวาดในกรอบของตัวเอง เด็กจะได้มองจอเดียวไม่ต้องสลับหน้าต่าง
-     ย่อเหลือ 240x180 แล้วบีบเป็น jpeg คุณภาพต่ำ เพราะเอาไปแสดงในกรอบเล็ก ๆ เท่านั้น
-     และส่งแค่ราว 8 ภาพต่อวินาที พอให้เห็นว่ามือขยับ ไม่ต้องลื่นเท่าวิดีโอจริง */
-  var SHOT_W = 240, SHOT_H = 180, SHOT_MS = 125;
-  var shotCv = null, shotCx = null, lastShot = 0;
 
-  function sendShot() {
-    if (!global.opener || global.opener.closed) return;
-    var now = Date.now();
-    if (now - lastShot < SHOT_MS) return;
-    lastShot = now;
+     ทางหลัก: createImageBitmap แล้วโอน (transfer) ภาพไปให้หน้าสอบตรง ๆ
+     ไม่ต้องบีบเป็น JPEG ไม่ต้องแปลงเป็นข้อความ base64 จึงเร็วกว่ามากและภาพคมกว่า
+     ทางสำรอง: เบราว์เซอร์ไหนโอน ImageBitmap ข้ามหน้าต่างไม่ได้ ค่อยถอยไปใช้ JPEG แบบเดิม */
+  var SHOT_W = 400, SHOT_H = 300;
+  var shotCv = null, shotCx = null, useBitmap = true;
+
+  function sendJpeg() {
     if (!shotCv) {
       shotCv = document.createElement('canvas');
       shotCv.width = SHOT_W; shotCv.height = SHOT_H;
@@ -329,8 +343,25 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
     }
     try {
       shotCx.drawImage(video, 0, 0, SHOT_W, SHOT_H);
-      post('frame', null, shotCv.toDataURL('image/jpeg', 0.5));
-    } catch (e) { }                      /* บางเบราว์เซอร์โยนตอนเฟรมยังไม่พร้อม ข้ามไปเฟรมหน้า */
+      post('frame', null, shotCv.toDataURL('image/jpeg', 0.6));
+    } catch (e) { }
+  }
+
+  function sendShot() {
+    if (!global.opener || global.opener.closed) return;
+    if (!useBitmap || !global.createImageBitmap) { sendJpeg(); return; }
+    createImageBitmap(video, { resizeWidth: SHOT_W, resizeHeight: SHOT_H, resizeQuality: 'low' })
+      .then(function (bmp) {
+        try {
+          global.opener.postMessage({ type: MSG, kind: 'frame', bmp: bmp }, '*', [bmp]);
+        } catch (e) {
+          /* โอนไม่ผ่าน เลิกใช้ทางนี้ไปเลย จะได้ไม่ต้องลองใหม่ทุกเฟรม */
+          useBitmap = false;
+          try { bmp.close(); } catch (e2) { }
+          sendJpeg();
+        }
+      })
+      .catch(function () { useBitmap = false; sendJpeg(); });
   }
 
   function msg(text, warn) {
@@ -375,27 +406,31 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
 
   /* เดิมวนด้วย requestAnimationFrame แต่ Safari หยุดวาดจอของหน้าต่างที่ถูกบังมิด
      พอเด็กคลิกกลับไปหน้าสอบ หน้าต่างกล้องไปอยู่ข้างหลัง ภาพเลยค้างและหยุดนับนิ้วไปเลย
-     ตัวจับเวลาไม่ผูกกับการวาดจอ จึงเดินต่อแม้หน้าต่างจะไม่ได้อยู่หน้าสุด */
-  var timer = null;
-  var TICK_MS = 100;
+     ตัวจับเวลาไม่ผูกกับการวาดจอ จึงเดินต่อแม้หน้าต่างจะไม่ได้อยู่หน้าสุด
 
-  function tick() {
-    if (!on || !video || video.readyState < 2) return;
-    sendShot();
-    if (!busy) {
-      busy = true;
-      hands.send({ image: video }).catch(function () { }).then(function () { busy = false; });
-    }
-  }
+     แยกสองจังหวะ: ภาพต้องถี่ถึงจะดูลื่น ส่วนการนับนิ้วช้ากว่านั้นได้มาก
+     (มือคนไม่ได้เปลี่ยนท่า 20 ครั้งต่อวินาที) ถ้าปล่อยให้ตัวตรวจจับมือรันทุกเฟรม
+     มันจะกินซีพียูจนภาพกระตุก */
+  var frameTimer = null, handTimer = null;
+  var FRAME_MS = 50, HAND_MS = 150;
+
+  function ready() { return on && video && video.readyState >= 2; }
 
   function pump() {
-    if (timer) clearInterval(timer);
-    timer = setInterval(tick, TICK_MS);
+    if (frameTimer) clearInterval(frameTimer);
+    if (handTimer) clearInterval(handTimer);
+    frameTimer = setInterval(function () { if (ready()) sendShot(); }, FRAME_MS);
+    handTimer = setInterval(function () {
+      if (!ready() || busy) return;
+      busy = true;
+      hands.send({ image: video }).catch(function () { }).then(function () { busy = false; });
+    }, HAND_MS);
   }
 
   function stop() {
     on = false;
-    if (timer) { clearInterval(timer); timer = null; }
+    if (frameTimer) { clearInterval(frameTimer); frameTimer = null; }
+    if (handTimer) { clearInterval(handTimer); handTimer = null; }
     if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
     if (video) video.srcObject = null;
     if (dotEl) dotEl.className = 'dot';
@@ -411,7 +446,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
     if (btn) btn.disabled = true;
     msg('กำลังขอสิทธิ์ใช้กล้อง…');
 
-    navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 }, audio: false })
+    navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false })
       .then(function (s) {
         stream = s;
         video.srcObject = s;
