@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>กล้องนับนิ้ว — ArduinoSim</title>
+<style>
+/* cam.css — หน้ากล้องนับนิ้ว (cam.html) หน้าต่างเล็กที่เปิดแยกจากหน้าสอบ
+   ไม่เกี่ยวกับ app.css ของหน้าสอบเลย */
+:root{
+  --bg:#111a16; --panel:#18231e; --line:#2a3a32;
+  --ink:#e6efe9; --dim:#93a49b; --ok:#4fc79b; --warn:#f0a35c;
+  --mono:'SFMono-Regular',ui-monospace,Menlo,monospace;
+  --sans:'IBM Plex Sans Thai','Noto Sans Thai',system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+  display:flex;flex-direction:column;min-height:100vh}
+header{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;
+  align-items:center;gap:10px}
+header h1{margin:0;font-size:16px;font-weight:600;flex:1}
+.dot{width:9px;height:9px;border-radius:50%;background:#5b6b63}
+.dot.on{background:var(--ok)}
+main{flex:1;display:flex;flex-direction:column;gap:12px;padding:16px}
+.stage{position:relative;background:#000;border:1px solid var(--line);border-radius:8px;
+  overflow:hidden;aspect-ratio:4/3}
+video{width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+.num{position:absolute;right:10px;bottom:8px;font-family:var(--mono);font-size:54px;
+  font-weight:600;line-height:1;color:var(--dim);text-shadow:0 2px 12px #000}
+.num.lit{color:var(--ok)}
+button{font-family:inherit;font-size:14px;font-weight:600;padding:9px 16px;border-radius:6px;
+  border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+button:hover{border-color:var(--ok)}
+.msg{font-size:13.5px;color:var(--dim);line-height:1.6;min-height:44px}
+.msg.warn{color:var(--warn)}
+footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--dim)}
+
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="camDot"></span>
+  <h1>กล้องนับนิ้ว</h1>
+  <button id="camBtn">เปิดกล้อง</button>
+</header>
+<main>
+  <div class="stage">
+    <video id="camVideo" playsinline muted></video>
+    <div class="num" id="camNum">–</div>
+  </div>
+  <p class="msg" id="camMsg"></p>
+</main>
+<footer>ชูนิ้วหน้ากล้อง จำนวนนิ้วจะถูกส่งเข้าจอ Serial ของหน้าสอบให้อัตโนมัติ · ภาพไม่ถูกส่งออกไปไหน ประมวลผลในเครื่องทั้งหมด</footer>
+<script>
+/* camera.js — กล้องนับนิ้วสำหรับ "โหมดฝึก" เท่านั้น
+   ---------------------------------------------------------------
+   ของจริงในชิ้นงาน: หน้าเว็บเปิดกล้อง นับนิ้ว แล้วส่งอักขระ '0'-'5' ออก Web Serial
+   ที่นี่แทน Web Serial ด้วย ide.sendSerial() ซึ่งเป็นทางเดียวกับปุ่ม 0-5 ทุกประการ
+   บอร์ดจำลองจึงไม่รู้เลยว่าค่ามาจากกล้องหรือจากปุ่ม
+
+   จงใจไม่ใส่ในหน้าสอบ: ตอนกดตรวจระบบรันด้วยนาฬิกาจำลองและป้อนค่าตามสคริปต์
+   เพื่อให้ตรวจกี่ครั้งก็ได้คะแนนเท่าเดิม เอามือจริงมาเกี่ยวข้องเมื่อไหร่คะแนนก็ไม่นิ่ง
+
+   โหลด MediaPipe Hands ตอนกดเปิดกล้องครั้งแรกเท่านั้น (หลายเมกะไบต์)
+   ไม่กดก็ไม่โหลด หน้าเว็บเปิดเร็วเท่าเดิม */
+(function (global) {
+  'use strict';
+
+  var CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/';
+
+  /* ปลายนิ้วกับข้อกลางของสี่นิ้ว (ไม่รวมโป้ง) — เทียบแกน y: ปลายนิ้วอยู่สูงกว่าข้อ = กางอยู่ */
+  var TIP = [8, 12, 16, 20];
+  var PIP = [6, 10, 14, 18];
+
+  function dist(a, b) {
+    var dx = a.x - b.x, dy = a.y - b.y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /* นับนิ้วที่กางอยู่จาก 21 จุดของ MediaPipe
+     โป้งใช้แกน y ไม่ได้ เพราะมันกางออกข้าง ชิ้นงานเดิมจึงเทียบแกน x
+     แต่การเทียบแกน x ต้องรู้ว่ามือซ้ายหรือขวาและกล้องกลับด้านไหม พลาดง่าย
+     ที่นี่วัดระยะจากโคนนิ้วก้อย (จุด 17) แทน: ถ้าปลายโป้งอยู่ไกลกว่าข้อโป้ง แปลว่ากางออก
+     ใช้ได้ทั้งมือซ้ายมือขวา ไม่ต้องสนใจว่าภาพกลับด้านหรือเปล่า */
+  function countFingers(lm) {
+    var n = 0;
+    for (var i = 0; i < TIP.length; i++) {
+      if (lm[TIP[i]].y < lm[PIP[i]].y) n++;
+    }
+    var base = lm[17];
+    if (dist(lm[4], base) > dist(lm[3], base) * 1.15) n++;
+    return n;
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.crossOrigin = 'anonymous';
+      s.onload = resolve;
+      s.onerror = function () { reject(new Error('โหลดไฟล์จาก CDN ไม่สำเร็จ')); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function attach(ide) {
+    var btn = document.getElementById('btnCam');
+    if (!btn) return null;                      /* หน้าสอบไม่มีปุ่มนี้ ก็ไม่ทำอะไร */
+
+    var panel = document.getElementById('camPanel');
+    var video = document.getElementById('camVideo');
+    var numEl = document.getElementById('camNum');
+    var msgEl = document.getElementById('camMsg');
+    var closeBtn = document.getElementById('camClose');
+
+    var stream = null, hands = null, on = false, busy = false;
+    var lastSent = null, stable = -1, stableFor = 0;
+    var popup = null;                            /* หน้าต่างกล้องแยก ใช้ตอนหน้านี้ถูกฝังใน iframe */
+
+    function msg(text) { if (msgEl) msgEl.textContent = text || ''; }
+    function show(v) { if (panel) panel.style.display = v ? '' : 'none'; }
+
+    function setNum(n) {
+      if (!numEl) return;
+      numEl.textContent = n == null ? '–' : String(n);
+      numEl.className = 'cam-num' + (n ? ' lit' : '');
+    }
+
+    /* ค่าจากกล้องกระพริบตลอด (มือสั่น แสงเปลี่ยน) ถ้าส่งทุกเฟรมคิวจะท่วม
+       ต้องนิ่งติดกัน 4 เฟรมและต่างจากค่าที่ส่งไปล่าสุด จึงจะส่งจริง */
+    function feed(n) {
+      setNum(n);
+      if (n === stable) stableFor++; else { stable = n; stableFor = 1; }
+      if (stableFor < 4 || n === lastSent) return;
+      /* จำเฉพาะค่าที่ส่งออกไปจริง ๆ ถ้าจำตอนยังไม่ได้รัน เด็กที่ชู 3 นิ้วค้างไว้แล้วค่อยกดรัน
+         จะไม่มีค่าไหนถูกส่งเลย เพราะค่าถัดไปเท่ากับที่จำไว้ ต้องกำมือแล้วชูใหม่ถึงจะติด */
+      if (!ide.running) { msg('นับได้ ' + n + ' นิ้ว — กดรันโปรแกรมก่อน บอร์ดถึงจะรับค่า'); return; }
+      lastSent = n;
+      ide.sendSerial(String(n));
+      msg('ส่ง ' + n + ' เข้า Serial แล้ว');
+    }
+
+    function onResults(res) {
+      var h = res && res.multiHandLandmarks;
+      if (!h || !h.length) { setNum(null); stable = -1; stableFor = 0; return; }
+      feed(countFingers(h[0]));
+    }
+
+    function pump() {
+      if (!on) return;
+      if (!busy && video.readyState >= 2) {
+        busy = true;
+        hands.send({ image: video })
+          .catch(function () { })
+          .then(function () { busy = false; });
+      }
+      requestAnimationFrame(pump);
+    }
+
+    function stop() {
+      on = false;
+      if (popup) { try { if (!popup.closed) popup.close(); } catch (e) { } popup = null; }
+      if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+      if (video) video.srcObject = null;
+      show(false);
+      btn.textContent = 'เปิดกล้อง';
+      btn.classList.remove('on');
+      lastSent = null; stable = -1; stableFor = 0;
+    }
+
+    /* หน้าที่ deploy บน Google Apps Script ถูกฝังไว้ใน iframe ของ google อีกที
+       เบราว์เซอร์ห้าม getUserMedia ใน iframe ข้ามโดเมน เว้นแต่ iframe นั้นเขียน allow="camera"
+       ซึ่งเป็น iframe ของ Google เราแก้ไม่ได้
+       ทางออกคือเปิดหน้ากล้อง (cam.html ที่โฮสต์ไว้ข้างนอก) เป็นหน้าต่างใหม่
+       หน้าต่างใหม่เป็นหน้าต่างระดับบนสุด ไม่ติดข้อห้ามของ iframe แล้วให้มันส่งจำนวนนิ้วกลับมา */
+    function embedded() {
+      try { return window.self !== window.top; } catch (e) { return true; }
+    }
+
+    /* รับค่าจากหน้าต่างกล้อง — เช็กที่ตัวหน้าต่างผู้ส่ง ไม่ใช่เช็กโดเมน
+       เพราะโดเมนของหน้าสอบบน Apps Script เปลี่ยนไปเรื่อย ๆ ระบุล่วงหน้าไม่ได้
+       ข้อความจากหน้าต่างอื่นหรือรูปแบบไม่ตรงจะถูกทิ้งทั้งหมด */
+    function onMessage(e) {
+      if (!popup || e.source !== popup) return;
+      var d = e.data;
+      if (!d || d.type !== 'arduino-cam') return;
+      if (d.kind === 'closed') { stop(); return; }
+      if (d.kind === 'ready') { msg('ชูนิ้วในหน้าต่างกล้องได้เลย'); return; }
+      if (d.kind === 'count' && typeof d.n === 'number' && d.n >= 0 && d.n <= 5) feed(d.n);
+    }
+
+    function openPopup() {
+      var url = global.ARDUINO_CAM_URL;
+      show(true);
+      if (!url) {
+        msg('หน้านี้เปิดผ่าน Google Apps Script ซึ่งฝังเว็บไว้ในกรอบอีกชั้น เบราว์เซอร์จึงไม่ยอมเปิดกล้องตรงนี้ ' +
+            'ครูยังไม่ได้ตั้งลิงก์หน้ากล้องแยก — ใช้ปุ่ม 0-5 ใต้จอ Serial ส่งค่าแทนได้เลย ผลเหมือนกันทุกประการ');
+        return;
+      }
+      popup = global.open(url, 'arduinoCam', 'width=430,height=560');
+      if (!popup) {
+        msg('เบราว์เซอร์บล็อกหน้าต่างใหม่ — กดอนุญาตป๊อปอัปของเว็บนี้ แล้วกดเปิดกล้องอีกครั้ง');
+        return;
+      }
+      on = true;
+      btn.textContent = 'ปิดกล้อง';
+      btn.classList.add('on');
+      msg('เปิดหน้าต่างกล้องแล้ว — กดอนุญาตใช้กล้องในหน้าต่างนั้น แล้วชูนิ้วได้เลย');
+    }
+
+    function start() {
+      if (embedded()) { openPopup(); return; }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        show(true);
+        msg('เบราว์เซอร์นี้เปิดกล้องไม่ได้ — กล้องใช้ได้เฉพาะหน้าเว็บที่เปิดผ่าน https หรือ localhost ' +
+            'ถ้าเปิดด้วยเลข IP ในวง LAN เบราว์เซอร์จะบล็อกกล้องเสมอ');
+        return;
+      }
+      show(true);
+      btn.disabled = true;
+      msg('กำลังขอสิทธิ์ใช้กล้อง…');
+
+      navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 }, audio: false })
+        .then(function (s) {
+          stream = s;
+          video.srcObject = s;
+          video.play();
+          msg('กำลังโหลดตัวตรวจจับมือ (ครั้งแรกอาจนานสักครู่)…');
+          return global.Hands ? null : loadScript(CDN + 'hands.js');
+        })
+        .then(function () {
+          if (!global.Hands) throw new Error('โหลดตัวตรวจจับมือไม่สำเร็จ');
+          if (!hands) {
+            hands = new global.Hands({ locateFile: function (f) { return CDN + f; } });
+            hands.setOptions({
+              maxNumHands: 1,
+              modelComplexity: 0,          /* รุ่นเบา ลื่นกว่าบนโน้ตบุ๊กเครื่องเรียน */
+              minDetectionConfidence: 0.6,
+              minTrackingConfidence: 0.6
+            });
+            hands.onResults(onResults);
+          }
+          on = true;
+          btn.disabled = false;
+          btn.textContent = 'ปิดกล้อง';
+          btn.classList.add('on');
+          msg(ide.running ? 'ชูนิ้วหน้ากล้องได้เลย' : 'ชูนิ้วได้เลย แต่ต้องกดรันโปรแกรมก่อน บอร์ดถึงจะรับค่า');
+          pump();
+        })
+        .catch(function (e) {
+          btn.disabled = false;
+          stop();
+          show(true);
+          var name = e && e.name;
+          if (name === 'NotAllowedError') msg('ไม่ได้รับสิทธิ์ใช้กล้อง — กดไอคอนกล้องบนแถบที่อยู่ของเบราว์เซอร์เพื่ออนุญาต');
+          else if (name === 'NotFoundError') msg('หากล้องไม่เจอ — เครื่องนี้อาจไม่มีกล้อง หรือมีโปรแกรมอื่นใช้อยู่');
+          else msg('เปิดกล้องไม่สำเร็จ: ' + (e && e.message ? e.message : 'ไม่ทราบสาเหตุ'));
+        });
+    }
+
+    btn.addEventListener('click', function () { if (on) stop(); else start(); });
+    if (closeBtn) closeBtn.addEventListener('click', stop);
+    if (global.addEventListener) global.addEventListener('message', onMessage);
+
+    /* feed กับ onMessage เปิดไว้ให้เทสต์เรียกตรง ๆ จะได้ตรวจได้โดยไม่ต้องมีกล้องจริง */
+    return { start: start, stop: stop, feed: feed, countFingers: countFingers,
+             onMessage: onMessage, setPopup: function (w) { popup = w; } };
+  }
+
+  global.ArduinoCamera = { attach: attach, countFingers: countFingers };
+
+})(window);
+
+</script>
+<script>
+/* cam-popup.js — ตัวหน้ากล้องนับนิ้ว (ใช้ในหน้า cam.html เท่านั้น)
+   ---------------------------------------------------------------
+   หน้านี้โฮสต์ไว้นอก Google Apps Script แล้วให้หน้าสอบเปิดเป็นหน้าต่างใหม่
+   เพราะหน้าสอบบน Apps Script ถูกฝังใน iframe ข้ามโดเมน เปิดกล้องไม่ได้เสมอ
+   ส่วนหน้าต่างที่เปิดใหม่เป็นหน้าต่างระดับบนสุด จึงขอสิทธิ์กล้องได้ตามปกติ
+
+   นับนิ้วได้เท่าไหร่ก็ยิงกลับไปให้หน้าสอบทาง postMessage ทุกเฟรม
+   ฝั่งหน้าสอบมีตัวกรองความนิ่ง (ต้องนิ่ง 4 เฟรมถึงจะส่งเข้า Serial) อยู่แล้ว
+   ที่นี่จึงไม่ต้องกรองซ้ำ ส่งดิบ ๆ ไปเลย ตรรกะการกรองจะได้มีที่เดียว */
+(function (global) {
+  'use strict';
+
+  var CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/';
+  var MSG = 'arduino-cam';                     /* ป้ายกำกับข้อความ กันชนกับสคริปต์อื่นในหน้า */
+
+  var video, numEl, msgEl, dotEl, btn;
+  var stream = null, hands = null, on = false, busy = false, last = null;
+
+  function msg(text, warn) {
+    if (!msgEl) return;
+    msgEl.textContent = text || '';
+    msgEl.className = 'msg' + (warn ? ' warn' : '');
+  }
+
+  function setNum(n) {
+    if (!numEl) return;
+    numEl.textContent = n == null ? '–' : String(n);
+    numEl.className = 'num' + (n ? ' lit' : '');
+  }
+
+  /* ส่งกลับไปที่หน้าต่างที่เปิดเรามา ใช้ '*' เพราะโดเมนของหน้าสอบบน Apps Script
+     เป็น googleusercontent ที่เปลี่ยนไปเรื่อย ๆ ระบุล่วงหน้าไม่ได้
+     ข้อมูลที่ส่งมีแค่ตัวเลข 0-5 ไม่มีภาพและไม่มีข้อมูลส่วนตัวใด ๆ ออกไป */
+  function post(kind, n) {
+    if (!global.opener || global.opener.closed) return;
+    try { global.opener.postMessage({ type: MSG, kind: kind, n: n }, '*'); } catch (e) { }
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.crossOrigin = 'anonymous';
+      s.onload = resolve;
+      s.onerror = function () { reject(new Error('โหลดไฟล์จาก CDN ไม่สำเร็จ')); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function onResults(res) {
+    var h = res && res.multiHandLandmarks;
+    if (!h || !h.length) { setNum(null); last = null; return; }
+    var n = global.ArduinoCamera.countFingers(h[0]);
+    setNum(n);
+    post('count', n);
+    if (n !== last) { last = n; }
+  }
+
+  function pump() {
+    if (!on) return;
+    if (!busy && video.readyState >= 2) {
+      busy = true;
+      hands.send({ image: video }).catch(function () { }).then(function () { busy = false; });
+    }
+    requestAnimationFrame(pump);
+  }
+
+  function stop() {
+    on = false;
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+    if (video) video.srcObject = null;
+    if (dotEl) dotEl.className = 'dot';
+    setNum(null);
+    if (btn) btn.textContent = 'เปิดกล้อง';
+  }
+
+  function start() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      msg('เบราว์เซอร์นี้เปิดกล้องไม่ได้ — หน้ากล้องต้องเปิดผ่าน https หรือ localhost เท่านั้น', true);
+      return;
+    }
+    if (btn) btn.disabled = true;
+    msg('กำลังขอสิทธิ์ใช้กล้อง…');
+
+    navigator.mediaDevices.getUserMedia({ video: { width: 480, height: 360 }, audio: false })
+      .then(function (s) {
+        stream = s;
+        video.srcObject = s;
+        video.play();
+        msg('กำลังโหลดตัวตรวจจับมือ (ครั้งแรกอาจนานสักครู่)…');
+        return global.Hands ? null : loadScript(CDN + 'hands.js');
+      })
+      .then(function () {
+        if (!global.Hands) throw new Error('โหลดตัวตรวจจับมือไม่สำเร็จ');
+        if (!hands) {
+          hands = new global.Hands({ locateFile: function (f) { return CDN + f; } });
+          hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+          });
+          hands.onResults(onResults);
+        }
+        on = true;
+        if (btn) { btn.disabled = false; btn.textContent = 'ปิดกล้อง'; }
+        if (dotEl) dotEl.className = 'dot on';
+        post('ready');
+        msg(global.opener ? 'ชูนิ้วได้เลย ค่าจะวิ่งไปที่หน้าสอบเอง — อย่าปิดหน้าต่างนี้ระหว่างทดสอบ'
+                          : 'หน้านี้เปิดขึ้นมาเดี่ยว ๆ นับนิ้วให้ดูได้ แต่ไม่มีหน้าสอบให้ส่งค่าไปหา');
+        pump();
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        stop();
+        var name = e && e.name;
+        if (name === 'NotAllowedError') msg('ไม่ได้รับสิทธิ์ใช้กล้อง — กดไอคอนกล้องบนแถบที่อยู่ของเบราว์เซอร์เพื่ออนุญาต แล้วกดเปิดกล้องใหม่', true);
+        else if (name === 'NotFoundError') msg('หากล้องไม่เจอ — เครื่องนี้อาจไม่มีกล้อง หรือมีโปรแกรมอื่นใช้อยู่', true);
+        else msg('เปิดกล้องไม่สำเร็จ: ' + (e && e.message ? e.message : 'ไม่ทราบสาเหตุ'), true);
+      });
+  }
+
+  function init() {
+    video = document.getElementById('camVideo');
+    numEl = document.getElementById('camNum');
+    msgEl = document.getElementById('camMsg');
+    dotEl = document.getElementById('camDot');
+    btn = document.getElementById('camBtn');
+    if (btn) btn.addEventListener('click', function () { if (on) stop(); else start(); });
+    /* บอกหน้าสอบด้วยว่าหน้าต่างนี้ปิดแล้ว หน้าสอบจะได้คืนปุ่มเป็น "เปิดกล้อง" */
+    global.addEventListener('beforeunload', function () { post('closed'); });
+    msg('กดปุ่มเปิดกล้องเพื่อเริ่ม');
+    start();                                   /* เปิดให้เลย เด็กจะได้ไม่ต้องกดสองที */
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+
+})(window);
+
+</script>
+</body>
+</html>
