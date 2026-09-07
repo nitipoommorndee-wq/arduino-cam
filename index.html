@@ -117,6 +117,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
     var stream = null, hands = null, on = false, busy = false;
     var lastSent = null, stable = -1, stableFor = 0;
     var popup = null;                            /* หน้าต่างกล้องแยก ใช้ตอนหน้านี้ถูกฝังใน iframe */
+    var lastFrame = 0, watchdog = null;          /* คอยดูว่าภาพยังส่งมาอยู่ไหม */
 
     function msg(text) { if (msgEl) msgEl.textContent = text || ''; }
     function show(v) { if (panel) panel.style.display = v ? '' : 'none'; }
@@ -160,6 +161,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
 
     function stop() {
       on = false;
+      if (watchdog) { clearInterval(watchdog); watchdog = null; }
       if (popup) { try { if (!popup.closed) popup.close(); } catch (e) { } popup = null; }
       if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
       if (video) { video.srcObject = null; video.style.display = ''; }
@@ -190,6 +192,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       if (d.kind === 'ready') { msg('ชูนิ้วหน้ากล้องได้เลย ภาพจะมาโชว์ตรงนี้'); return; }
       /* ภาพมาเป็น data:image/jpeg ที่หน้าต่างกล้องวาดเอง ไม่ได้โหลดจากที่อื่น */
       if (d.kind === 'frame' && typeof d.img === 'string' && d.img.indexOf('data:image/jpeg') === 0) {
+        lastFrame = Date.now();
         if (shotEl) { shotEl.src = d.img; shotEl.hidden = false; }
         if (video) video.style.display = 'none';
         return;
@@ -213,6 +216,14 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       on = true;
       btn.textContent = 'ปิดกล้อง';
       btn.classList.add('on');
+      /* ถ้าเบราว์เซอร์ไปหยุดหน้าต่างกล้องจนภาพไม่มาเลย บอกวิธีแก้ ดีกว่าปล่อยให้เห็นภาพค้างเฉย ๆ */
+      lastFrame = Date.now();
+      if (watchdog) clearInterval(watchdog);
+      watchdog = setInterval(function () {
+        if (!on || !popup || popup.closed) return;
+        if (Date.now() - lastFrame > 5000)
+          msg('ภาพหยุดส่ง — คลิกที่หน้าต่างกล้องหนึ่งครั้งให้มันตื่น แล้วอย่าเอาหน้าต่างอื่นบังมิด');
+      }, 2000);
       msg('เปิดหน้าต่างกล้องแล้ว — กดอนุญาตใช้กล้องในหน้าต่างนั้นครั้งเดียว ' +
     'จากนั้นเลื่อนหน้าต่างไปไว้ข้าง ๆ ได้ ภาพจะมาโชว์ในกรอบนี้เอง');
     }
@@ -362,18 +373,29 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
     if (n !== last) { last = n; }
   }
 
-  function pump() {
-    if (!on) return;
-    if (video.readyState >= 2) sendShot();
-    if (!busy && video.readyState >= 2) {
+  /* เดิมวนด้วย requestAnimationFrame แต่ Safari หยุดวาดจอของหน้าต่างที่ถูกบังมิด
+     พอเด็กคลิกกลับไปหน้าสอบ หน้าต่างกล้องไปอยู่ข้างหลัง ภาพเลยค้างและหยุดนับนิ้วไปเลย
+     ตัวจับเวลาไม่ผูกกับการวาดจอ จึงเดินต่อแม้หน้าต่างจะไม่ได้อยู่หน้าสุด */
+  var timer = null;
+  var TICK_MS = 100;
+
+  function tick() {
+    if (!on || !video || video.readyState < 2) return;
+    sendShot();
+    if (!busy) {
       busy = true;
       hands.send({ image: video }).catch(function () { }).then(function () { busy = false; });
     }
-    requestAnimationFrame(pump);
+  }
+
+  function pump() {
+    if (timer) clearInterval(timer);
+    timer = setInterval(tick, TICK_MS);
   }
 
   function stop() {
     on = false;
+    if (timer) { clearInterval(timer); timer = null; }
     if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
     if (video) video.srcObject = null;
     if (dotEl) dotEl.className = 'dot';
@@ -413,7 +435,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
         if (btn) { btn.disabled = false; btn.textContent = 'ปิดกล้อง'; }
         if (dotEl) dotEl.className = 'dot on';
         post('ready');
-        msg(global.opener ? 'ชูนิ้วได้เลย ค่าจะวิ่งไปที่หน้าสอบเอง — อย่าปิดหน้าต่างนี้ระหว่างทดสอบ'
+        msg(global.opener ? 'ชูนิ้วได้เลย ภาพกับค่าจะวิ่งไปที่หน้าสอบเอง — ย่อหน้าต่างนี้ไว้ข้างหลังได้ แต่อย่าปิด'
                           : 'หน้านี้เปิดขึ้นมาเดี่ยว ๆ นับนิ้วให้ดูได้ แต่ไม่มีหน้าสอบให้ส่งค่าไปหา');
         pump();
       })
