@@ -110,6 +110,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
     var panel = document.getElementById('camPanel');
     var video = document.getElementById('camVideo');
     var numEl = document.getElementById('camNum');
+    var shotEl = document.getElementById('camShot');   /* ภาพที่หน้าต่างกล้องส่งกลับมา */
     var msgEl = document.getElementById('camMsg');
     var closeBtn = document.getElementById('camClose');
 
@@ -161,7 +162,8 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       on = false;
       if (popup) { try { if (!popup.closed) popup.close(); } catch (e) { } popup = null; }
       if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
-      if (video) video.srcObject = null;
+      if (video) { video.srcObject = null; video.style.display = ''; }
+      if (shotEl) { shotEl.hidden = true; shotEl.removeAttribute('src'); }
       show(false);
       btn.textContent = 'เปิดกล้อง';
       btn.classList.remove('on');
@@ -185,7 +187,13 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       var d = e.data;
       if (!d || d.type !== 'arduino-cam') return;
       if (d.kind === 'closed') { stop(); return; }
-      if (d.kind === 'ready') { msg('ชูนิ้วในหน้าต่างกล้องได้เลย'); return; }
+      if (d.kind === 'ready') { msg('ชูนิ้วหน้ากล้องได้เลย ภาพจะมาโชว์ตรงนี้'); return; }
+      /* ภาพมาเป็น data:image/jpeg ที่หน้าต่างกล้องวาดเอง ไม่ได้โหลดจากที่อื่น */
+      if (d.kind === 'frame' && typeof d.img === 'string' && d.img.indexOf('data:image/jpeg') === 0) {
+        if (shotEl) { shotEl.src = d.img; shotEl.hidden = false; }
+        if (video) video.style.display = 'none';
+        return;
+      }
       if (d.kind === 'count' && typeof d.n === 'number' && d.n >= 0 && d.n <= 5) feed(d.n);
     }
 
@@ -197,7 +205,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
             'ครูยังไม่ได้ตั้งลิงก์หน้ากล้องแยก — ใช้ปุ่ม 0-5 ใต้จอ Serial ส่งค่าแทนได้เลย ผลเหมือนกันทุกประการ');
         return;
       }
-      popup = global.open(url, 'arduinoCam', 'width=430,height=560');
+      popup = global.open(url, 'arduinoCam', 'width=360,height=430');
       if (!popup) {
         msg('เบราว์เซอร์บล็อกหน้าต่างใหม่ — กดอนุญาตป๊อปอัปของเว็บนี้ แล้วกดเปิดกล้องอีกครั้ง');
         return;
@@ -205,7 +213,8 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
       on = true;
       btn.textContent = 'ปิดกล้อง';
       btn.classList.add('on');
-      msg('เปิดหน้าต่างกล้องแล้ว — กดอนุญาตใช้กล้องในหน้าต่างนั้น แล้วชูนิ้วได้เลย');
+      msg('เปิดหน้าต่างกล้องแล้ว — กดอนุญาตใช้กล้องในหน้าต่างนั้นครั้งเดียว ' +
+    'จากนั้นเลื่อนหน้าต่างไปไว้ข้าง ๆ ได้ ภาพจะมาโชว์ในกรอบนี้เอง');
     }
 
     function start() {
@@ -291,6 +300,28 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
   var video, numEl, msgEl, dotEl, btn;
   var stream = null, hands = null, on = false, busy = false, last = null;
 
+  /* ส่งภาพกลับไปให้หน้าสอบวาดในกรอบของตัวเอง เด็กจะได้มองจอเดียวไม่ต้องสลับหน้าต่าง
+     ย่อเหลือ 240x180 แล้วบีบเป็น jpeg คุณภาพต่ำ เพราะเอาไปแสดงในกรอบเล็ก ๆ เท่านั้น
+     และส่งแค่ราว 8 ภาพต่อวินาที พอให้เห็นว่ามือขยับ ไม่ต้องลื่นเท่าวิดีโอจริง */
+  var SHOT_W = 240, SHOT_H = 180, SHOT_MS = 125;
+  var shotCv = null, shotCx = null, lastShot = 0;
+
+  function sendShot() {
+    if (!global.opener || global.opener.closed) return;
+    var now = Date.now();
+    if (now - lastShot < SHOT_MS) return;
+    lastShot = now;
+    if (!shotCv) {
+      shotCv = document.createElement('canvas');
+      shotCv.width = SHOT_W; shotCv.height = SHOT_H;
+      shotCx = shotCv.getContext('2d');
+    }
+    try {
+      shotCx.drawImage(video, 0, 0, SHOT_W, SHOT_H);
+      post('frame', null, shotCv.toDataURL('image/jpeg', 0.5));
+    } catch (e) { }                      /* บางเบราว์เซอร์โยนตอนเฟรมยังไม่พร้อม ข้ามไปเฟรมหน้า */
+  }
+
   function msg(text, warn) {
     if (!msgEl) return;
     msgEl.textContent = text || '';
@@ -306,9 +337,9 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
   /* ส่งกลับไปที่หน้าต่างที่เปิดเรามา ใช้ '*' เพราะโดเมนของหน้าสอบบน Apps Script
      เป็น googleusercontent ที่เปลี่ยนไปเรื่อย ๆ ระบุล่วงหน้าไม่ได้
      ข้อมูลที่ส่งมีแค่ตัวเลข 0-5 ไม่มีภาพและไม่มีข้อมูลส่วนตัวใด ๆ ออกไป */
-  function post(kind, n) {
+  function post(kind, n, img) {
     if (!global.opener || global.opener.closed) return;
-    try { global.opener.postMessage({ type: MSG, kind: kind, n: n }, '*'); } catch (e) { }
+    try { global.opener.postMessage({ type: MSG, kind: kind, n: n, img: img }, '*'); } catch (e) { }
   }
 
   function loadScript(src) {
@@ -333,6 +364,7 @@ footer{padding:10px 16px;border-top:1px solid var(--line);font-size:12px;color:v
 
   function pump() {
     if (!on) return;
+    if (video.readyState >= 2) sendShot();
     if (!busy && video.readyState >= 2) {
       busy = true;
       hands.send({ image: video }).catch(function () { }).then(function () { busy = false; });
